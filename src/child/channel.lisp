@@ -46,19 +46,76 @@
 ;;;       SB-KERNEL::HEAP-EXHAUSTED-ERROR, a STORAGE-CONDITION).
 ;;; At most one :result or :error frame, and it is the last frame.
 
+(defmacro %with-frame-syntax (&body body)
+  "BODY under the frame syntax: standard syntax, *PACKAGE* KEYWORD,
+   *READ-EVAL* NIL."
+  `(with-standard-io-syntax
+     (let ((*package* (find-package '#:keyword))
+           (*read-eval* nil))
+       ,@body)))
+
 (defun frame-string (form)
   "FORM printed for a frame body (see the file header): standard syntax,
    *PACKAGE* KEYWORD, *PRINT-READABLY* T, *READ-EVAL* NIL. An unreadable value signals
    PRINT-NOT-READABLE. → a string."
-  (declare (ignore form))
-  (%pending 'frame-string))
+  (%with-frame-syntax
+    (let ((*print-readably* t))
+      (prin1-to-string form))))
 
 (defun write-frame (form stream)
   "Write FORM as one frame (see the file header) to STREAM, an output
    stream of (UNSIGNED-BYTE 8), then FINISH-OUTPUT. Nothing is written when
    FRAME-STRING signals. → FORM."
-  (declare (ignore form stream))
-  (%pending 'write-frame))
+  ;; The body is printed (and may signal) before any byte is written; the
+  ;; frame then goes out in one WRITE-SEQUENCE.
+  (let* ((body (babel:string-to-octets (frame-string form) :encoding :utf-8))
+         (header (babel:string-to-octets (format nil "~d~c" (length body) #\Newline)
+                                         :encoding :ascii))
+         (frame (make-array (+ (length header) (length body) 1)
+                            :element-type '(unsigned-byte 8))))
+    (replace frame header)
+    (replace frame body :start1 (length header))
+    (setf (aref frame (1- (length frame))) 10)
+    (write-sequence frame stream)
+    (finish-output stream)
+    form))
+
+(defun %channel-error (pathname offset control &rest arguments)
+  (error 'channel-error :pathname pathname :offset offset
+                        :message (apply #'format nil control arguments)))
+
+(defun %read-file-octets (pathname offset)
+  "The octets of PATHNAME from byte OFFSET to its current end, or NIL when
+   the file does not exist."
+  (with-open-file (in pathname :element-type '(unsigned-byte 8)
+                               :if-does-not-exist nil)
+    (when in
+      (let* ((end (file-length in))
+             (octets (make-array (max 0 (- end offset))
+                                 :element-type '(unsigned-byte 8))))
+        (when (plusp (length octets))
+          (file-position in offset)
+          (let ((n (read-sequence octets in)))
+            (when (< n (length octets))
+              (setf octets (subseq octets 0 n)))))
+        octets))))
+
+(defun %read-body (pathname offset octets start end)
+  "The one form in OCTETS[START, END) (UTF-8), read under the frame syntax.
+   Anything else signals CHANNEL-ERROR at OFFSET."
+  (handler-case
+      (let ((text (babel:octets-to-string octets :start start :end end
+                                                 :encoding :utf-8)))
+        (%with-frame-syntax
+          (multiple-value-bind (form position) (read-from-string text)
+            (let ((eof '#:eof))
+              (unless (eq eof (read-from-string text nil eof :start position))
+                (%channel-error pathname offset "the frame body is more than one form")))
+            form)))
+    ;; A translation site: the reader's and the decoder's own conditions
+    ;; become the channel's, with their report.
+    ((or reader-error end-of-file babel:character-coding-error) (c)
+      (%channel-error pathname offset "the frame body is not one readable form: ~a" c))))
 
 (defun read-frames (pathname offset)
   "Read the complete frames of the channel file PATHNAME that start at byte
@@ -68,5 +125,35 @@
    A missing file → (values NIL OFFSET). A header that is not decimal
    digits, a body that is not exactly one readable form, or a frame not
    ended by LF signals CHANNEL-ERROR (OFFSET = the bad frame's start)."
-  (declare (ignore pathname offset))
-  (%pending 'read-frames))
+  (check-type offset (integer 0))
+  (let ((octets (%read-file-octets pathname offset)))
+    (if (null octets)
+        (values nil offset)
+        (let ((n (length octets)) (pos 0) (forms '()))
+          (loop
+            (when (>= pos n) (return))
+            (let* ((start pos)
+                   (lf (position 10 octets :start pos))
+                   (header-end (or lf n)))
+              ;; Any non-digit in the header is an error now, even before
+              ;; its LF arrives; only a digits-only prefix is incomplete.
+              (loop for i from start below header-end
+                    unless (<= 48 (aref octets i) 57)
+                      do (%channel-error pathname (+ offset start)
+                                         "the frame header is not decimal digits"))
+              (when (null lf) (return))
+              (when (= lf start)
+                (%channel-error pathname (+ offset start) "the frame header is empty"))
+              (let* ((length (parse-integer
+                              (babel:octets-to-string octets :start start :end lf
+                                                             :encoding :ascii)))
+                     (body (1+ lf))
+                     (body-end (+ body length)))
+                ;; Body or final LF not all there yet: incomplete.
+                (when (>= body-end n) (return))
+                (unless (= 10 (aref octets body-end))
+                  (%channel-error pathname (+ offset start)
+                                  "the frame is not ended by LF"))
+                (push (%read-body pathname (+ offset start) octets body body-end) forms)
+                (setf pos (1+ body-end)))))
+          (values (nreverse forms) (+ offset pos))))))

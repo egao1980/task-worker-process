@@ -34,8 +34,77 @@
 ;;; handler, a fatal runtime error): those reach the parent as an exit code
 ;;; and the log.
 
+(defun %read-request (pathname)
+  "The request plist in PATHNAME (frame syntax, *READ-EVAL* NIL)."
+  (with-open-file (in pathname :external-format :utf-8)
+    (%with-frame-syntax (read in))))
+
+(defun %heap-exhausted-p (condition)
+  "T for heap exhaustion (SBCL: SB-KERNEL::HEAP-EXHAUSTED-ERROR). Not every
+   STORAGE-CONDITION: a control stack exhaustion is a handler error."
+  #+sbcl (let ((type (find-symbol "HEAP-EXHAUSTED-ERROR" "SB-KERNEL")))
+           (and type (typep condition type) t))
+  #-sbcl (typep condition 'storage-condition))
+
+(defun %error-frame (condition)
+  "The :error frame for CONDITION (see channel.lisp)."
+  (let ((type (%with-frame-syntax
+                (prin1-to-string (class-name (class-of condition)))))
+        (message (handler-case (princ-to-string condition)
+                   ;; a report that fails must not lose the frame
+                   (error () nil))))
+    (list :error :type type
+                 :message (or message (format nil "<unprintable ~a>" type))
+                 :heap-exhausted (%heap-exhausted-p condition))))
+
+(defun %run-request (request directory channel)
+  "Steps 3–5 of CHILD-MAIN. → the handler's value."
+  (destructuring-bind (&key handler systems payload &allow-other-keys) request
+    (mapc #'asdf:load-system systems)
+    (let* ((name (with-standard-io-syntax
+                   (let ((*package* (find-package '#:cl-user))
+                         (*read-eval* nil))
+                     (read-from-string handler))))
+           (function (fdefinition name))
+           (cancel-file (merge-pathnames +cancel-file+ directory)))
+      (funcall function payload
+               :report-progress
+               (lambda (&key phase fraction message)
+                 (check-type fraction (or null (real 0 1)))
+                 (write-frame (list :progress :phase phase :fraction fraction
+                                              :message message)
+                              channel)
+                 nil)
+               :cancel-requested-p
+               (lambda () (and (probe-file cancel-file) t))))))
+
+(defun %flush-standard-streams ()
+  (dolist (s (list *standard-output* *error-output*))
+    (handler-case (finish-output s)
+      (stream-error () nil))))
+
 (defun child-main (directory)
   "Run the job described in DIRECTORY (see the file header) and exit the
    process. Never returns."
-  (declare (ignore directory))
-  (%pending 'child-main))
+  (let* ((directory (uiop:ensure-directory-pathname directory))
+         (request (handler-case (%read-request (merge-pathnames +request-file+ directory))
+                    ;; unreadable request: exit 2, no frame
+                    ((or file-error reader-error end-of-file) ()
+                      (%flush-standard-streams)
+                      (uiop:quit 2 nil))))
+         (code 1))
+    (with-open-file (channel (merge-pathnames +channel-file+ directory)
+                             :direction :output :element-type '(unsigned-byte 8)
+                             :if-exists :append :if-does-not-exist :create)
+      (let ((frame (handler-case (list :result (%run-request request directory channel))
+                     ;; HANDLER-CASE, not HANDLER-BIND: the handler's stack
+                     ;; (and a heap hoard) is unwound before the frame is made.
+                     (serious-condition (c) (%error-frame c)))))
+        (handler-case
+            (progn (write-frame frame channel)
+                   (when (eq :result (first frame)) (setf code 0)))
+          ;; an unreadable result: WRITE-FRAME wrote nothing
+          (print-not-readable (c)
+            (write-frame (%error-frame c) channel)))))
+    (%flush-standard-streams)
+    (uiop:quit code nil)))
