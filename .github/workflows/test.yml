@@ -1,0 +1,15 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# SBCL only: the supervisor's default child command starts SBCL with its own
+# heap size. ECL / CCL children need a :lisp-command of their own (not
+# covered yet).
+jobs:
+  test:
+    uses: egao1980/cl-repository/.github/workflows/test-system.yml@main
