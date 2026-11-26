@@ -38,7 +38,7 @@ The handler lives in `my-batch` and is loaded in the child only:
 ## 0.1.0 (contract)
 
 Status: implemented (team-solve: 38 tests). The spec is the file headers (`src/supervisor.lisp`,
-`src/registry.lisp`, `src/child/channel.lisp`, `src/child/main.lisp`); the The tests in `tests/` grade it.
+`src/registry.lisp`, `src/child/channel.lisp`, `src/child/main.lisp`); the tests in `tests/` grade them.
 
 Dependencies: `task-protocol` 0.3.0, `process-protocol` 0.4.1 +
 `process-backend-uiop` (launch / wait / kill, process groups),
