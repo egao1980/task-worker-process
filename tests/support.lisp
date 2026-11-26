@@ -160,10 +160,26 @@
     (error (c) c)))
 
 (defun %sh (script)
-  "A LISP-COMMAND that ignores its arguments and runs /bin/sh -c SCRIPT."
+  "A LISP-COMMAND that ignores its arguments and runs /bin/sh -c SCRIPT
+(Unix only: the signal test)."
   (lambda (heap-mb boot-file)
     (declare (ignore heap-mb boot-file))
     (list "/bin/sh" "-c" script)))
+
+(defun %fake-argv (&key say (code 0))
+  "Argv of a fake child, portable: this image's SBCL (runtime and core) that
+prints SAY (when given) to its stdout and exits with CODE, loading nothing."
+  (list (namestring sb-ext:*runtime-pathname*)
+        "--core" (namestring sb-ext:*core-pathname*)
+        "--noinform" "--non-interactive" "--no-sysinit" "--no-userinit"
+        "--eval" (format nil "(progn ~@[(write-line ~S) ~](finish-output) (sb-ext:exit :code ~D :abort t))"
+                         say code)))
+
+(defun %fake (&key say (code 0))
+  "A LISP-COMMAND that ignores its arguments and runs %FAKE-ARGV."
+  (lambda (heap-mb boot-file)
+    (declare (ignore heap-mb boot-file))
+    (%fake-argv :say say :code code)))
 
 (defun %submit (queue kind &rest keys)
   (apply #'q:submit-job queue kind keys))

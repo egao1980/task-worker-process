@@ -1,7 +1,8 @@
 (in-package #:task-worker-process/tests)
 
 ;;; 0.1.0 contract: outcomes, restarts and the job directory, with a
-;;; LISP-COMMAND that runs /bin/sh instead of a Lisp (fast; Unix only).
+;;; LISP-COMMAND that runs a fake child (this SBCL with one --eval) instead of
+;;; the child entry; the signal test alone uses /bin/sh and is skipped on Windows.
 
 (deftest command-gets-heap-and-boot-file
   (let* ((queue (%queue))
@@ -11,7 +12,7 @@
                                          (push (list heap-mb boot-file
                                                      (and (probe-file boot-file) t))
                                                calls)
-                                         (list "/bin/sh" "-c" "exit 0")))))
+                                         (%fake-argv :code 0)))))
     (%submit queue :echo :resource-class :tiny)
     (%submit queue :echo)
     (w:run-next-job s)
@@ -29,7 +30,7 @@
 (deftest nonzero-exit-fails-the-job
   (let* ((queue (%queue))
          (seen nil)
-         (s (%supervisor queue :lisp-command (%sh "echo hello from the child; exit 7")
+         (s (%supervisor queue :lisp-command (%fake :say "hello from the child" :code 7)
                                :on-child-failure (lambda (c) (setf seen c))))
          (id (%submit queue :echo)))
     (let ((job (w:run-next-job s)))
@@ -50,6 +51,8 @@
     (ok (null (w:supervisor-running-jobs s)))))
 
 (deftest signalled-child
+  #+(or windows win32) (skip "no POSIX signals on Windows")
+  #-(or windows win32)
   (let* ((queue (%queue))
          (s (%supervisor queue :lisp-command (%sh "kill -9 $$")))
          (id (%submit queue :echo)))
@@ -81,7 +84,7 @@
          (s (%supervisor queue :lisp-command (lambda (h b)
                                                (declare (ignore h b))
                                                (incf launches)
-                                               (list "/bin/sh" "-c" "exit 0"))))
+                                               (%fake-argv :code 0))))
          (table (let ((h (make-hash-table :test 'equal)))
                   (setf (gethash "k" h) 1)
                   h))
@@ -109,7 +112,7 @@
                          :lisp-command (lambda (h b)
                                          (declare (ignore h b))
                                          (incf launches)
-                                         (list "/bin/sh" "-c" "exit 4"))
+                                         (%fake-argv :code 4))
                          :on-child-failure (lambda (c)
                                              (declare (ignore c))
                                              (when (= 1 (incf failures))
@@ -127,7 +130,7 @@
          (cmd (lambda (h boot)
                 (declare (ignore h))
                 (push (uiop:pathname-directory-pathname boot) dirs)
-                (list "/bin/sh" "-c" "echo logged; exit 6")))
+                (%fake-argv :say "logged" :code 6)))
          (gone (%supervisor queue :lisp-command cmd))
          (kept (%supervisor queue :lisp-command cmd :keep-work-directories t))
          (id1 (%submit queue :echo :payload '(:n 1)))
