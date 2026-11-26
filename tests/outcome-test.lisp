@@ -61,7 +61,7 @@
 
 (deftest exit-zero-without-result
   (let* ((queue (%queue))
-         (s (%supervisor queue :lisp-command (%sh "exit 0")))
+         (s (%supervisor queue :lisp-command (%fake :code 0)))
          (id (%submit queue :echo)))
     (w:run-next-job s)
     (ok (%contains (%failure queue id) "child failure (no-result)"
@@ -95,7 +95,7 @@
 
 (deftest use-value-completes-the-job
   (let* ((queue (%queue))
-         (s (%supervisor queue :lisp-command (%sh "exit 5")
+         (s (%supervisor queue :lisp-command (%fake :code 5)
                                :on-child-failure (lambda (c)
                                                    (declare (ignore c))
                                                    (use-value '(:substitute 1)))))
